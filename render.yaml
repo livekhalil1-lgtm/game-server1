@@ -7,5 +7,3 @@ services:
     envVars:
       - key: PORT
         value: "8080"
-      - key: GOOGLE_APPLICATION_CREDENTIALS
-        value: firebase-key.json

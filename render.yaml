@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: wogad-server
+    env: node
+    buildCommand: npm install
+    startCommand: node server-cloud.js
+    envVars:
+      - key: PORT
+        value: "8080"
+      - key: GOOGLE_APPLICATION_CREDENTIALS
+        value: firebase-key.json

@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>وكر الأوغاد - Wild City Mafia</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <div id="loginScreen" class="screen active">
+    <div class="login-overlay"></div>
+    <div class="login-box">
+      <img src="assets/city_boss@2x.png" class="login-logo">
+      <h1>وكر الأوغاد</h1>
+      <p class="subtitle">Wild City Mafia RPG</p>
+      <input type="text" id="loginName" placeholder="اسم اللاعب" maxlength="20">
+      <button onclick="doLogin()">دخول إلى المدينة</button>
+      <div id="loginError" class="error"></div>
+    </div>
+  </div>
+
+  <div id="gameScreen" class="screen">
+    <div id="topBar">
+      <div class="stat"><span>👤</span> <span id="pName">-</span></div>
+      <div class="stat"><span>⭐</span> مستوى <span id="pLevel">1</span></div>
+      <div class="stat"><span>💰</span> <span id="pMoney">0</span></div>
+      <div class="stat"><span>💎</span> <span id="pGold">0</span></div>
+      <div class="stat"><span>❤️</span> <span id="pHealth">100</span>/<span id="pMaxHealth">100</span></div>
+      <div class="stat"><span>⚡</span> <span id="pEnergy">100</span></div>
+      <div class="stat"><span>🧠</span> <span id="pNerve">100</span></div>
+    </div>
+
+    <div id="gameContainer">
+      <div id="sidebar">
+        <div class="sidebar-title">القائمة</div>
+        <button class="nav-btn" onclick="showPanel('city')">🏙️ المدينة</button>
+        <button class="nav-btn" onclick="showPanel('crimes')">🔫 جرائم</button>
+        <button class="nav-btn" onclick="showPanel('fight')">⚔️ قتال</button>
+        <button class="nav-btn" onclick="showPanel('gym')">💪 النادي</button>
+        <button class="nav-btn" onclick="showPanel('shop')">🏪 المتجر</button>
+        <button class="nav-btn" onclick="showPanel('job')">💼 وظيفة</button>
+        <button class="nav-btn" onclick="showPanel('hospital')">🏥 مستشفى</button>
+        <button class="nav-btn" onclick="showPanel('dungeon')">🏰 مغامرة</button>
+        <button class="nav-btn" onclick="showPanel('casino')">🎰 قمار</button>
+        <button class="nav-btn" onclick="showPanel('school')">📚 أكاديمية</button>
+        <button class="nav-btn" onclick="showPanel('airport')">✈️ مطار</button>
+        <button class="nav-btn" onclick="showPanel('prison')">⛓️ سجن</button>
+        <button class="nav-btn" onclick="showPanel('chat')">💬 شات</button>
+        <button class="nav-btn" onclick="showPanel('stats')">📊 إحصائيات</button>
+      </div>
+
+      <div id="mainPanel">
+        <div id="panel-city" class="panel active"><div class="orig-city" id="cityMap">
+          <div class="city-btn" onclick="showPanel('crimes')" style="top:8%;left:5%" title="جرائم"></div>
+          <div class="city-btn" onclick="showPanel('fight')" style="top:5%;left:22%" title="قتال"></div>
+          <div class="city-btn" onclick="showPanel('gym')" style="top:12%;left:40%" title="نادي"></div>
+          <div class="city-btn" onclick="showPanel('shop')" style="top:6%;left:58%" title="متجر"></div>
+          <div class="city-btn" onclick="showPanel('job')" style="top:10%;left:76%" title="وظائف"></div>
+          <div class="city-btn" onclick="showPanel('hospital')" style="top:28%;left:4%" title="مستشفى"></div>
+          <div class="city-btn" onclick="showPanel('dungeon')" style="top:33%;left:22%" title="مغامرة"></div>
+          <div class="city-btn" onclick="showPanel('casino')" style="top:38%;left:40%" title="كازينو"></div>
+          <div class="city-btn" onclick="showPanel('school')" style="top:32%;left:58%" title="أكاديمية"></div>
+          <div class="city-btn" onclick="showPanel('airport')" style="top:36%;left:76%" title="مطار"></div>
+          <div class="city-btn" onclick="showPanel('prison')" style="top:55%;left:5%" title="سجن"></div>
+          <div class="city-btn" onclick="showPanel('bank')" style="top:60%;left:22%" title="بنك"></div>
+        </div></div>
+
+        <div id="panel-crimes" class="panel">
+          <div class="panel-bg" style="background-image:url(assets/jiequzhan@2x.png)"></div>
+          <div class="po"><h2>🔫 جرائم</h2>
+            <div class="npc-row"><img src="assets/1NPC@2x.png" class="npc"><img src="assets/2NPC@2x.png" class="npc"><img src="assets/3NPC@2x.png" class="npc"></div>
+            <div id="crimeList"></div>
+            <div id="crimeResult" class="res"></div>
+          </div>
+        </div>
+
+        <div id="panel-fight" class="panel">
+          <div class="panel-bg" style="background-image:url(assets/chengzhan@2x.png)"></div>
+          <div class="po"><h2>⚔️ قتال</h2>
+            <div class="npc-row"><img src="assets/4NPC@2x.png" class="npc"><img src="assets/5NPC@2x.png" class="npc"></div>
+            <button class="abtn" onclick="doFight(3)">⚔️ قتال NPC</button>
+            <button class="abtn" onclick="doFight(0)">👤 قتال لاعب</button>
+            <button class="abtn" onclick="doCooperateBoss()">👥 قتال تعاوني</button>
+            <button class="abtn" onclick="doFAFight()">🌀 قتال القوى</button>
+            <button class="abtn" onclick="doFight(6)">🏆 سلم التحدي</button>
+            <div id="fightResult" class="res"></div>
+          </div>
+        </div>
+
+        <div id="panel-gym" class="panel">
+          <div class="panel-bg" style="background-image:url(assets/motianlou@2x.png)"></div>
+          <div class="po"><h2>💪 النادي</h2>
+            <div class="npc-row"><img src="assets/6NPC@2x.png" class="npc"><img src="assets/7NPC@2x.png" class="npc"></div>
+            <div class="sr">💪 <b id="gymStr">0</b> 🏃 <b id="gymEnd">0</b> 💨 <b id="gymSpd">0</b> 🎯 <b id="gymNim">0</b></div>
+            <button class="abtn" onclick="doExercise(1,1)">🏋️ قوة</button>
+            <button class="abtn" onclick="doExercise(1,2)">🏃 تحمل</button>
+            <button class="abtn" onclick="doExercise(1,3)">💨 سرعة</button>
+            <button class="abtn" onclick="doExercise(1,4)">🎯 رشاقة</button>
+            <button class="abtn" onclick="doExercise(2,0)">🔄 إعادة توزيع</button>
+            <div id="gymResult" class="res"></div>
+          </div>
+        </div>
+
+        <div id="panel-shop" class="panel">
+          <div class="panel-bg" style="background-image:url(assets/building@2x.png)"></div>
+          <div class="po"><h2>🏪 المتجر</h2>
+            <button class="abtn" onclick="showShop(0)">🔫 أسلحة</button>
+            <button class="abtn" onclick="showShop(1)">🛡️ حماية</button>
+            <button class="abtn" onclick="showShop(2)">💊 أدوية</button>
+            <button class="abtn" onclick="showShop(3)">📦 منتجات</button>
+            <button class="abtn" onclick="showShop(5)">🎒 مهمات</button>
+            <div id="shopList"></div>
+            <div id="shopResult" class="res"></div>
+          </div>
+        </div>
+
+        <div id="panel-job" class="panel">
+          <div class="panel-bg" style="background-image:url(assets/motianlou_sp@2x.png)"></div>
+          <div class="po"><h2>💼 وظائف</h2>
+            <div class="npc-row"><img src="assets/9NPC@2x.png" class="npc"><img src="assets/JiuBaLaoBan@2x.png" class="npc"></div>
+            <div id="jobList"></div>
+            <div id="jobResult" class="res"></div>
+          </div>
+        </div>
+
+        <div id="panel-hospital" class="panel">
+          <div class="panel-bg" style="background-image:url(assets/zhuyuan@2x.png)"></div>
+          <div class="po"><h2>🏥 مستشفى</h2>
+            <div class="npc-row"><img src="assets/YiYuan_job@2x.png" class="npc"></div>
+            <div class="hbc">❤️ <span id="hospitalHealth">100</span>/<span id="hospitalMaxHealth">100</span></div>
+            <div class="hb"><div class="hf" id="healthFill" style="width:100%"></div></div>
+            <button class="abtn" onclick="doCure(0)">💊 علاج كامل</button>
+            <button class="abtn" onclick="doCure(1)">💉 استخدام دواء</button>
+            <div id="cureResult" class="res"></div>
+          </div>
+        </div>
+
+        <div id="panel-dungeon" class="panel">
+          <div class="panel-bg" style="background-image:url(assets/fuben@2x.png)"></div>
+          <div class="po"><h2>🏰 مغامرة</h2>
+            <img src="assets/city_fuben1@2x.png" class="pimg">
+            <button class="abtn" onclick="doEnterDungeon()">🚪 دخول الزنزانة</button>
+            <button class="abtn" onclick="doPassLevel(1)">🏁 اجتياز المستوى</button>
+            <div id="dungeonResult" class="res"></div>
+          </div>
+        </div>
+
+        <div id="panel-casino" class="panel">
+          <div class="panel-bg" style="background-image:url(assets/DuChang@2x.png)"></div>
+          <div class="po"><h2>🎰 كازينو</h2>
+            <div class="cimgs"><img src="assets/laohuji@2x.png" class="ci"><img src="assets/duchang21dian@2x.png" class="ci"><img src="assets/dezhoupuke@2x.png" class="ci"><img src="assets/duchang_hongheizhen@2x.png" class="ci"></div>
+            <button class="abtn" onclick="doGamble(1)">🎰 سلوتس</button>
+            <button class="abtn" onclick="doGamble(2)">🃏 21 نقطة</button>
+            <button class="abtn" onclick="doGamble(3)">♠️ بوكر</button>
+            <button class="abtn" onclick="doGamble(4)">🔴⚫ أحمر/أسود</button>
+            <div id="gambleResult" class="res"></div>
+          </div>
+        </div>
+
+        <div id="panel-school" class="panel">
+          <div class="panel-bg" style="background-image:url(assets/school@2x.png)"></div>
+          <div class="po"><h2>📚 أكاديمية</h2>
+            <img src="assets/10NPC@2x.png" class="npc-lg">
+            <button class="abtn" onclick="doStudy()">📖 دراسة</button>
+            <div id="studyResult" class="res"></div>
+          </div>
+        </div>
+
+        <div id="panel-airport" class="panel">
+          <div class="panel-bg" style="background-image:url(assets/feiji@2x.png)"></div>
+          <div class="po"><h2>✈️ مطار</h2>
+            <img src="assets/CTLSQingXingYunDongFeiJi@2x.png" class="pimg">
+            <div id="cityList"></div>
+            <div id="flyResult" class="res"></div>
+          </div>
+        </div>
+
+        <div id="panel-prison" class="panel">
+          <div class="panel-bg" style="background-image:url(assets/jianyu@2x.png)"></div>
+          <div class="po"><h2>⛓️ سجن</h2>
+            <p id="prisonStatus">لست في السجن</p>
+            <button class="abtn" onclick="doPrisonBail()">💰 كفالة</button>
+            <button class="abtn" onclick="doPrisonBust()">💥 هروب</button>
+            <div id="prisonResult" class="res"></div>
+          </div>
+        </div>
+
+        <div id="panel-chat" class="panel">
+          <div class="panel-bg" style="background-image:url(assets/chat@2x.png)"></div>
+          <div class="po"><h2>💬 شات</h2>
+            <div id="chatMessages" class="cb"></div>
+            <div class="cir"><input type="text" id="chatInput" placeholder="اكتب رسالة..." onkeypress="if(event.key==='Enter') doChat()"><button class="abtn" onclick="doChat()">إرسال</button></div>
+          </div>
+        </div>
+
+        <div id="panel-bank" class="panel">
+          <div class="panel-bg" style="background-image:url(assets/bank@2x.png)"></div>
+          <div class="po"><h2>🏦 بنك</h2>
+            <p>💰 رصيدك: <span id="bankMoney">0</span></p>
+            <button class="abtn" onclick="doSalary()">💰 استلام الراتب</button>
+            <div id="salaryResult" class="res"></div>
+          </div>
+        </div>
+
+        <div id="panel-stats" class="panel">
+          <div class="po"><h2>📊 إحصائيات</h2><div id="statsContent"></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<script src="game.js"></script>
+</body>
+</html>

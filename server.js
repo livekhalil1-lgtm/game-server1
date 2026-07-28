@@ -52,11 +52,15 @@ app.use((req, res, next) => {
   next();
 });
 
+function jsonRes(res, data) {
+  schedulePersist();
+  res.json(data);
+}
+
 function xorRes(res, data) {
-  const json = JSON.stringify(data);
-  // Try to send as XOR-only first (compatible with test client)
-  res.set('Content-Type', 'application/octet-stream');
-  res.send(xorEncode(json));
+  schedulePersist();
+  // Send as JSON for the game client (it expects JSON with sessionToken etc.)
+  res.json(data);
 }
 
 const gameData = JSON.parse(fs.readFileSync(path.join(__dirname, 'data', 'city_data.json'), 'utf8'));
@@ -80,16 +84,11 @@ function schedulePersist() {
   }, 5000);
 }
 
-function xorRes(res, data) {
-  schedulePersist();
-  res.set('Content-Type', 'application/octet-stream');
-  res.send(xorEncode(JSON.stringify(data)));
-}
-
 function getPlayer(req) {
-  const { token } = req.body || {};
-  if (!token) return null;
-  const playerId = DB.findPlayerIdByToken(token);
+  const { sessionToken, token } = req.body || {};
+  const t = sessionToken || token;
+  if (!t) return null;
+  const playerId = DB.findPlayerIdByToken(t);
   if (!playerId) return null;
   if (!playerCache.has(playerId)) {
     const p = DB.findPlayerById(playerId);
@@ -142,21 +141,23 @@ app.post(['/', '/checkversion', '/maintenance/check'], (req, res) => {
 });
 
 app.post('/ReqLogin', (req, res) => {
-  const { device_id, name } = req.body || {};
-  let player = DB.findPlayerByDeviceId(device_id || `dev_${Date.now()}`);
+  const { device_id, deviceId, name, deviceType, deviceVersion, gameVersion, platform } = req.body || {};
+  const did = deviceId || device_id || `dev_${Date.now()}`;
+  console.log(`[LOGIN] deviceId=${did} name=${name || '?'} type=${deviceType || '?'} ver=${deviceVersion || '?'} gameVer=${gameVersion || '?'} platform=${platform || '?'}`);
+  let player = DB.findPlayerByDeviceId(did);
   if (!player) {
-    player = DB.createPlayer(device_id || `dev_${Date.now()}`, name || 'Player');
+    player = DB.createPlayer(did, name || 'Player');
     player = ensurePlayer(player);
     playerCache.set(player.id, player);
   } else {
     ensurePlayer(player);
     playerCache.set(player.id, player);
   }
-  const token = `tok_${player.id}_${Date.now()}`;
-  DB.saveSession(token, player.id);
+  const sessionToken = `tok_${player.id}_${Date.now()}`;
+  DB.saveSession(sessionToken, player.id);
   persistPlayer(player);
 
-  xorRes(res, { code: 1, player: { ...G.getPlayerStats(player), session_token: token } });
+  jsonRes(res, { code: 1, sessionToken, player: { ...G.getPlayerStats(player) } });
 });
 
 app.post('/ReqDoCrime', (req, res) => {

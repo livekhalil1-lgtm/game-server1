@@ -9,6 +9,13 @@ const app = express();
 app.use(express.static(path.join(__dirname, 'public')));
 const PORT = 8080;
 
+// Logger middleware BEFORE body parsers to capture raw info
+app.use((req, res, next) => {
+  const ct = req.get('Content-Type') || 'none';
+  console.log(`[REQ] ${req.method} ${req.path} ct=${ct}`);
+  next();
+});
+
 app.use(express.raw({ type: 'application/octet-stream', limit: '10mb' }));
 app.use(express.text({ type: 'text/plain', limit: '10mb' }));
 app.use(express.json());
@@ -16,6 +23,10 @@ app.use(express.urlencoded({ extended: true }));
 
 app.use((req, res, next) => {
   const raw = req.body;
+  if (raw) {
+    const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(String(raw));
+    console.log(`[RAW] ${req.method} ${req.path} body(${buf.length}B) ct=${req.get('Content-Type')||'?'} hex=${buf.slice(0, 96).toString('hex')} text=${buf.slice(0, 96).toString('latin1').replace(/[^\x20-\x7E]/g,'?')}`);
+  }
   if (!raw) return next();
   if (Buffer.isBuffer(raw) && raw.length > 0) {
     try {
@@ -56,11 +67,6 @@ try {
   const arStr = JSON.parse(fs.readFileSync(path.join(__dirname, 'data', 'rlString-ar.json'), 'utf8'));
   arStr.forEach(s => { stringDb[s.id] = s.text; });
 } catch (e) {}
-
-app.use((req, res, next) => {
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
-  next();
-});
 
 let autoPersistTimer = null;
 function schedulePersist() {
@@ -118,6 +124,22 @@ function ensurePlayer(player) {
   if (!player.gold) player.gold = 0;
   return player;
 }
+
+// Version check & maintenance endpoints (game expects JSON, not XOR)
+app.post(['/', '/checkversion', '/maintenance/check'], (req, res) => {
+  console.log(`[VERSION_CHECK] body keys=${Object.keys(req.body||{})} raw=${JSON.stringify(req.body||'')}`);
+  res.json({
+    reviewVersion: 0,
+    majorVersion: 1,
+    minorVersion: 1,
+    isNew: false,
+    heartbeat: 60,
+    version: '1.0.0',
+    checkversion: 'ok',
+    impart: { level: 1 },
+    crossPlat: true
+  });
+});
 
 app.post('/ReqLogin', (req, res) => {
   const { device_id, name } = req.body || {};

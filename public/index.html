@@ -51,20 +51,10 @@
       </div>
 
       <div id="mainPanel">
-        <div id="panel-city" class="panel active"><div class="orig-city" id="cityMap">
-          <div class="city-btn" onclick="showPanel('crimes')" style="top:8%;left:5%" title="جرائم"></div>
-          <div class="city-btn" onclick="showPanel('fight')" style="top:5%;left:22%" title="قتال"></div>
-          <div class="city-btn" onclick="showPanel('gym')" style="top:12%;left:40%" title="نادي"></div>
-          <div class="city-btn" onclick="showPanel('shop')" style="top:6%;left:58%" title="متجر"></div>
-          <div class="city-btn" onclick="showPanel('job')" style="top:10%;left:76%" title="وظائف"></div>
-          <div class="city-btn" onclick="showPanel('hospital')" style="top:28%;left:4%" title="مستشفى"></div>
-          <div class="city-btn" onclick="showPanel('dungeon')" style="top:33%;left:22%" title="مغامرة"></div>
-          <div class="city-btn" onclick="showPanel('casino')" style="top:38%;left:40%" title="كازينو"></div>
-          <div class="city-btn" onclick="showPanel('school')" style="top:32%;left:58%" title="أكاديمية"></div>
-          <div class="city-btn" onclick="showPanel('airport')" style="top:36%;left:76%" title="مطار"></div>
-          <div class="city-btn" onclick="showPanel('prison')" style="top:55%;left:5%" title="سجن"></div>
-          <div class="city-btn" onclick="showPanel('bank')" style="top:60%;left:22%" title="بنك"></div>
-        </div></div>
+        <div id="panel-city" class="panel active" style="background:#0a0505">
+          <canvas id="cityCanvas"></canvas>
+          <div id="buildingTooltip"></div>
+        </div>
 
         <div id="panel-crimes" class="panel">
           <div class="panel-bg" style="background-image:url(assets/jiequzhan@2x.png)"></div>

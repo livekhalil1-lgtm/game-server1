@@ -1,67 +1,65 @@
 const AdmZip = require('adm-zip');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 
-const APK_PATH = 'C:\\WINDOWS\\TEMP\\opencode\\game.apk';
-const PATCHED_APK_PATH = 'C:\\WINDOWS\\TEMP\\opencode\\game-patched.apk';
+const args = process.argv.slice(2);
 const OLD_URL = 'http://city-arab.anansigame.org:8080/';
-const NEW_URL = 'https://wog.up.railway.app/';
-const ENTRY_NAME = 'lib/armeabi/libcity_ar.so';
+const LIBS = ['lib/armeabi/libcity_ar.so', 'lib/armeabi-v7a/libcity_ar.so', 'lib/arm64-v8a/libcity_ar.so'];
 
-// Read APK
+if (args.length < 1) {
+  console.log('الاستخدام: node patch-apk-simple.js <input.apk> [new-url]');
+  console.log('مثال:    node patch-apk-simple.js wogad.apk http://192.168.1.152:8080/');
+  process.exit(1);
+}
+
+const APK_PATH = args[0];
+const NEW_URL = args[1] || 'http://192.168.1.152:8080/';
+
+if (!fs.existsSync(APK_PATH)) {
+  console.error(`الملف غير موجود: ${APK_PATH}`);
+  process.exit(1);
+}
+
+if (NEW_URL.length > OLD_URL.length) {
+  console.error(`الرابط الجديد أطول من القديم (${NEW_URL.length} > ${OLD_URL.length})`);
+  console.error(`استخدم رابط أقصر (مثلاً: http://IP:8080/ بدون www)`);
+  process.exit(1);
+}
+
+console.log(`📦 فتح APK: ${APK_PATH}`);
 const zip = new AdmZip(APK_PATH);
-const entry = zip.getEntry(ENTRY_NAME);
+let patched = 0;
 
-if (!entry) {
-  console.error('ERROR: Could not find ' + ENTRY_NAME + ' in APK');
+for (const libPath of LIBS) {
+  const entry = zip.getEntry(libPath);
+  if (!entry) { console.log(`  ⏭️  ${libPath} — غير موجود`); continue; }
+
+  const data = entry.getData();
+  const text = data.toString('latin1');
+  const idx = text.indexOf(OLD_URL);
+
+  if (idx === -1) { console.log(`  ⚠️  ${libPath} — الرابط غير موجود`); continue; }
+
+  console.log(`  🔍 ${libPath}: الرابط موجود @ offset ${idx}`);
+  const oldBuf = Buffer.from(OLD_URL, 'latin1');
+  const newBuf = Buffer.alloc(oldBuf.length, 0);
+  Buffer.from(NEW_URL, 'latin1').copy(newBuf, 0);
+  newBuf.copy(data, idx, 0, newBuf.length);
+  zip.addFile(libPath, data);
+  console.log(`  ✅ ${libPath} — تم التعديل`);
+  patched++;
+}
+
+if (patched === 0) {
+  console.error('❌ لم يتم تعديل أي ملف. الرابط القديم غير موجود.');
   process.exit(1);
 }
 
-const data = entry.getData();
-const text = data.toString('ascii');
-const idx = text.indexOf(OLD_URL);
-
-if (idx === -1) {
-  console.error('ERROR: Could not find URL "' + OLD_URL + '" in ' + ENTRY_NAME);
-  process.exit(1);
-}
-
-console.log('Found URL at offset ' + idx);
-console.log('Old URL: "' + OLD_URL + '" (' + OLD_URL.length + ' chars)');
-console.log('New URL: "' + NEW_URL + '" (' + NEW_URL.length + ' chars)');
-
-// Replace the URL with new URL + null padding
-const oldBuf = Buffer.from(OLD_URL, 'ascii');
-const newBuf = Buffer.alloc(oldBuf.length, 0); // Fill with nulls
-const newUrlBuf = Buffer.from(NEW_URL, 'ascii');
-newUrlBuf.copy(newBuf, 0);
-
-// Overwrite in the data buffer
-newBuf.copy(data, idx, 0, newBuf.length);
-
-// Replace the ZIP entry
-zip.addFile(ENTRY_NAME, data);
-
-// Write patched APK
-zip.writeZip(PATCHED_APK_PATH);
-console.log('Patched APK written to ' + PATCHED_APK_PATH);
-
-// Verify
-const verifyZip = new AdmZip(PATCHED_APK_PATH);
-const verifyEntry = verifyZip.getEntry(ENTRY_NAME);
-const verifyData = verifyEntry.getData();
-const verifyText = verifyData.toString('ascii');
-const verifyIdx = verifyText.indexOf(OLD_URL);
-const verifyNewIdx = verifyText.indexOf(NEW_URL);
-
-if (verifyNewIdx !== -1) {
-  console.log('VERIFY: New URL found at offset ' + verifyNewIdx + ' ✅');
-} else {
-  console.log('VERIFY: New URL NOT found ❌');
-}
-
-if (verifyIdx === -1) {
-  console.log('VERIFY: Old URL no longer present ✅');
-} else {
-  console.log('VERIFY: Old URL still present at offset ' + verifyIdx + ' ❌');
-}
+const outputPath = APK_PATH.replace('.apk', '-patched.apk');
+zip.writeZip(outputPath);
+console.log(`\n✅ تم إنشاء APK معدّل: ${outputPath}`);
+console.log(`🌐 الرابط الجديد: ${NEW_URL}`);
+console.log(`\n📱 انسخ الملف للجوال وثبته.`);
+console.log(`⚠️  قد تحتاج لتوقيع APK إذا الجهاز يمنع التثبيت.`);
+console.log(`   استخدم: https://apkpure.com/apk-signer`);

@@ -76,6 +76,27 @@ function save() {
   fs.writeFileSync(DB_PATH, buffer);
 }
 
+function backup() {
+  if (!db) return;
+  const bakDir = path.join(__dirname, 'backups');
+  if (!fs.existsSync(bakDir)) fs.mkdirSync(bakDir, { recursive: true });
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const bakPath = path.join(bakDir, `game_data_${ts}.db`);
+  const data = db.export();
+  fs.writeFileSync(bakPath, Buffer.from(data));
+  console.log(`[DB] Backup saved: ${bakPath}`);
+  
+  // Keep only last 10 backups
+  try {
+    const files = fs.readdirSync(bakDir).filter(f => f.endsWith('.db')).sort();
+    while (files.length > 10) {
+      const old = files.shift();
+      fs.unlinkSync(path.join(bakDir, old));
+    }
+  } catch(e) {}
+  return bakPath;
+}
+
 function getDb() { return db; }
 
 function playerToRow(p) {
@@ -256,7 +277,7 @@ function debugSessions() {
 }
 
 module.exports = {
-  initDatabase, getDb, save,
+  initDatabase, getDb, save, backup,
   findPlayerByDeviceId, findPlayerById, createPlayer, updatePlayer,
   saveSession, findPlayerIdByToken,
   getAllPlayers, addChat, getRecentChats, debugSessions,

@@ -1,56 +1,151 @@
-# دليل النشر السحابي - وكّر الأوغاد
+# دليل نشر خادم وكـر الأوغـاد
 
-## الطريقة 1: Railway.app (أسهل — مجاني)
+## المشكلة: CURL بدون SSL
+الـ APK الأصلي يستخدم **CURL 7.39.0 بدون SSL**. هذا يعني أن اللعبة لا تدعم HTTPS نهائياً.
+الحل: تشغيل السيرفر على **HTTP فقط** (منفذ 8080).
 
-1. ادخل على https://railway.app/new
-2. اختار **Deploy from GitHub repo**
-3. اربط حساب GitHub حقك
-4. اختار المشروع (رفع مجلد `game-server` كامل)
-5. Railway يكتشف `package.json` أوتوماتيك
-6. إعدادات المشروع:
-   - **Start Command**: `node server-cloud.js`
-   - **Port**: `8080`
-7. بعد النشر، راح يظهر رابط مثل: `https://wogad-server.up.railway.app`
+---
 
-## الطريقة 2: Render.com
-
-1. ادخل https://render.com
-2. New Web Service → Connect GitHub
-3. اختار repo
-4. الإعدادات:
-   - **Name**: `wogad-server`
-   - **Environment**: Node
-   - **Build Command**: `npm install`
-   - **Start Command**: `node server-cloud.js`
-5. Advanced → Add Environment Variable:
-   - `PORT`: `8080`
-6. Create Web Service
-
-## بعد النشر
-
-### تعديل APK (عشان الجوال يتصل بالسيرفر)
-
-#### الطريقة الأوتوماتيكية (إذا عندك apktool):
+## 🖥️ الخيار 1: تشغيل محلي (للاختبار)
 ```bash
-node patch-apk.js city_ar.apk "http://your-server-url:8080/"
+# وندوز
+start.bat
+
+# لينكس/ماك
+node server.js
+```
+- الرابط: `http://127.0.0.1:8080`
+- الواجهة: افتح الرابط في المتصفح
+- للموبايل: شغّل على نفس WiFi واستخدم `http://192.168.x.x:8080`
+
+---
+
+## ☁️ الخيار 2: VPS (للنشر الحقيقي)
+
+### مزودين رخيصين يدعمون HTTP:
+| المزود | السعر | الرابط |
+|--------|-------|--------|
+| RackNerd | $1.50/شهر | https://my.racknerd.com |
+| Oracle Cloud | مجاناً للأبد | https://www.oracle.com/cloud/free/ |
+| Hetzner | €3.29/شهر | https://www.hetzner.com |
+| Hostinger | $2.99/شهر | https://www.hostinger.com |
+
+### خطوات النشر السريع:
+```bash
+ssh root@YOUR_VPS_IP
+
+# تحميل السكريبت (أو استخدم deploy-vps.sh)
+apt update && apt install -y nodejs npm ufw
+ufw allow 8080/tcp
+
+# انسخ ملفات السيرفر إلى VPS (من جهازك)
+scp -r game-server/* root@YOUR_VPS_IP:/opt/wogad/
+
+# على الـ VPS
+cd /opt/wogad
+npm install
+node server.js
 ```
 
-#### الطريقة اليدوية (بدون apktool):
-1. افتح ملف `libcity_ar.so` بمحرر Hex مثل HxD
-2. ابحث عن: `http://city-arab.anansigame.org:8080/`
-3. استبدله بـ: `http://your-server-url:8080/`
-4. إذا الرابط الجديد أقصر، املأ الفراغ بـ 0x00
-5. الملفات المطلوب تعديلها:
-   - `lib/armeabi/libcity_ar.so`
-   - `lib/armeabi-v7a/libcity_ar.so`
-   - `lib/arm64-v8a/libcity_ar.so`
-6. أعد تعبئة APK
-7. وقّع APK (استخدم https://apkpure.com/apk-signer)
-8. نزّل على جوالك وشغّل
-
-### اختبار الاتصال
+### تشغيل دائم مع PM2:
 ```bash
-# من أي جهاز على النت، اختبر:
-curl http://your-server-url:8080/health
-# النتيجة: {"status":"ok","db":"firebase","project":"wogad-game"}
+npm install -g pm2
+pm2 start server.js --name wogad
+pm2 save
+pm2 startup systemd
 ```
+
+---
+
+## 📱 الخيار 3: Cloudflare Tunnel (مجاني)
+إذا كان مزود الخدمة يمنع HTTP:
+```bash
+# نصب cloudflared
+wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+
+# تشغيل Tunnel (بدون SSL!)
+./cloudflared tunnel --url http://127.0.0.1:8080
+```
+رابط HTTP مجاني من Cloudflare. ضعه في APK.
+
+---
+
+## 📱 ربط APK مع السيرفر
+
+### للعب المحلي:
+```
+http://192.168.1.xxx:8080/
+```
+غير `xxx` مع IP جهازك (استخدم `ipconfig` في وندوز أو `ifconfig` في لينكس).
+
+### للعب عبر VPS:
+```
+http://YOUR_VPS_IP:8080/
+```
+
+### تعديل APK:
+```bash
+node patch-apk.js YOUR_SERVER_URL
+```
+أو استخدم `patch-apk-simple.js` لنسخة أسهل.
+
+---
+
+## 🏠 DNS محلي (بدون تعديل APK)
+إذا تبي تلعب بدون تعديل APK:
+```bash
+# شغّل DNS redirect
+node dns-redirect.js
+```
+غير DNS الموبايل إلى IP جهازك، واللعبة تتصل بسيرفرك المحلي مباشرة.
+
+---
+
+## 🔥 جدار الحماية
+افتح المنفذ 8080:
+```bash
+# Ubuntu
+ufw allow 8080/tcp
+
+# CentOS
+firewall-cmd --add-port=8080/tcp --permanent
+firewall-cmd --reload
+
+# Windows
+New-NetFirewallRule -Name "Wogad8080" -DisplayName "Wogad 8080" -Protocol TCP -LocalPort 8080 -Action Allow
+```
+
+---
+
+## 🛡️ nginx (للمستخدمين المتقدمين)
+إذا كان عندك دومين وتحتاج SSL للمتصفح (الـ APK ما يحتاج SSL):
+```nginx
+server {
+    listen 80;
+    server_name yourdomain.com;
+    
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+    }
+}
+```
+
+---
+
+## ✅ التحقق من السيرفر
+```bash
+curl http://127.0.0.1:8080/health
+# → {"status":"ok","players":X,"uptime":Y}
+```
+
+---
+
+## ⚡ الأداء
+- SQLite يتحمل 50-100 لاعب متزامن
+- Player cache يقلل ضغط قاعدة البيانات
+- Auto-persist كل 5 ثواني
+- PM2 يعيد التشغيل تلقائياً عند crash

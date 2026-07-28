@@ -1,129 +1,88 @@
 const dns = require('dns');
 const udp = require('dgram');
+const os = require('os');
 
 const TARGET = 'city-arab.anansigame.org';
-const REDIRECT_IP = '192.168.1.152';
 const PORT = 53;
+
+// Auto-detect local IP
+function getLocalIP() {
+  const nets = os.networkInterfaces();
+  for (const name of Object.keys(nets)) {
+    for (const net of nets[name]) {
+      if (net.family === 'IPv4' && !net.internal) return net.address;
+    }
+  }
+  return '127.0.0.1';
+}
+
+const REDIRECT_IP = process.argv[2] || getLocalIP();
+console.log(`[DNS] Target: ${TARGET}`);
+console.log(`[DNS] Redirect to: ${REDIRECT_IP}`);
+console.log(`[DNS] Listening on port ${PORT}...`);
+console.log(`[DNS] Change phone WiFi DNS to ${REDIRECT_IP}`);
+console.log(`[DNS] *** IMPORTANT: Run as Administrator on Windows! ***`);
 
 const server = udp.createSocket('udp4');
 
+function buildAResponse(msg, queryEnd, ip) {
+  const resp = Buffer.alloc(512);
+  let offset = 0;
+  msg.copy(resp, 0, 0, 2); offset += 2; // ID
+  resp[offset++] = 0x85; resp[offset++] = 0x80; // Flags
+  resp[offset++] = 0x00; resp[offset++] = 0x01; // QDCOUNT
+  resp[offset++] = 0x00; resp[offset++] = 0x01; // ANCOUNT
+  resp[offset++] = 0x00; resp[offset++] = 0x00; // NSCOUNT
+  resp[offset++] = 0x00; resp[offset++] = 0x00; // ARCOUNT
+  const qlen = queryEnd + 4 - 12;
+  msg.copy(resp, offset, 12, queryEnd + 4); offset += qlen; // Question
+  resp[offset++] = 0xC0; resp[offset++] = 0x0C; // Name pointer
+  resp[offset++] = 0x00; resp[offset++] = 0x01; // A record
+  resp[offset++] = 0x00; resp[offset++] = 0x01; // IN class
+  resp[offset++] = 0x00; resp[offset++] = 0x00; resp[offset++] = 0x00; resp[offset++] = 0x3C; // TTL 60
+  resp[offset++] = 0x00; resp[offset++] = 0x04; // Data length
+  ip.split('.').forEach(n => resp[offset++] = parseInt(n));
+  return resp.slice(0, offset);
+}
+
 server.on('message', (msg, rinfo) => {
-  // Parse DNS query - simple A record response
-  const id = msg.slice(0, 2);
-  const flags = msg.slice(2, 4);
-  const qdcount = msg.readUInt16BE(4);
-  const questions = msg.slice(12);
-
-  // Find the question name
   let pos = 12;
-  let nameParts = [];
-  while (msg[pos] !== 0) {
-    const len = msg[pos];
-    nameParts.push(msg.slice(pos + 1, pos + 1 + len).toString());
-    pos += len + 1;
-  }
+  while (msg[pos] !== 0) pos++; // skip name
   pos += 1; // null terminator
-  const qname = nameParts.join('.');
   const qtype = msg.readUInt16BE(pos);
-  pos += 2;
-  const qclass = msg.readUInt16BE(pos);
+  // Read the domain name
+  pos = 12;
+  let nameParts = [];
+  while (msg[pos] !== 0) { const len = msg[pos]; nameParts.push(msg.slice(pos+1, pos+1+len).toString()); pos += len + 1; }
+  pos += 1;
+  const qname = nameParts.join('.');
 
-  if (qname === TARGET && qtype === 1) { // A record
-    const resp = Buffer.alloc(512);
-    let offset = 0;
-    // Transaction ID
-    msg.copy(resp, 0, 0, 2);
-    offset += 2;
-    // Flags: response, authoritative, no error
-    resp[offset++] = 0x85;
-    resp[offset++] = 0x80;
-    // Question count: 1
-    resp[offset++] = 0x00;
-    resp[offset++] = 0x01;
-    // Answer count: 1
-    resp[offset++] = 0x00;
-    resp[offset++] = 0x01;
-    // Authority & Additional: 0
-    resp[offset++] = 0x00;
-    resp[offset++] = 0x00;
-    resp[offset++] = 0x00;
-    resp[offset++] = 0x00;
-    // Copy original question
-    const qlen = pos + 4 - 12;
-    msg.copy(resp, offset, 12, pos + 4);
-    offset += qlen;
-    // Answer: name pointer 0xc00c
-    resp[offset++] = 0xc0;
-    resp[offset++] = 0x0c;
-    // Type: A (1)
-    resp[offset++] = 0x00;
-    resp[offset++] = 0x01;
-    // Class: IN (1)
-    resp[offset++] = 0x00;
-    resp[offset++] = 0x01;
-    // TTL: 60 seconds
-    resp[offset++] = 0x00;
-    resp[offset++] = 0x00;
-    resp[offset++] = 0x00;
-    resp[offset++] = 0x3c;
-    // Data length: 4 bytes (IPv4)
-    resp[offset++] = 0x00;
-    resp[offset++] = 0x04;
-    // IP
-    const parts = REDIRECT_IP.split('.');
-    parts.forEach(p => resp[offset++] = parseInt(p));
-
-    server.send(resp.slice(0, offset), rinfo.port, rinfo.address);
-    console.log(`[DNS] ${qname} -> ${REDIRECT_IP}`);
-  } else if (qname.includes('anansigame.org') || qname.includes('anansi')) {
-    // Also redirect anansigame.org subdomains
-    const resp = Buffer.alloc(512);
-    let offset = 0;
-    msg.copy(resp, 0, 0, 2);
-    offset += 2;
-    resp[offset++] = 0x85;
-    resp[offset++] = 0x80;
-    resp[offset++] = 0x00;
-    resp[offset++] = 0x01;
-    resp[offset++] = 0x00;
-    resp[offset++] = 0x01;
-    resp[offset++] = 0x00;
-    resp[offset++] = 0x00;
-    resp[offset++] = 0x00;
-    resp[offset++] = 0x00;
-    const qlen = pos + 4 - 12;
-    msg.copy(resp, offset, 12, pos + 4);
-    offset += qlen;
-    resp[offset++] = 0xc0;
-    resp[offset++] = 0x0c;
-    resp[offset++] = 0x00;
-    resp[offset++] = 0x01;
-    resp[offset++] = 0x00;
-    resp[offset++] = 0x01;
-    resp[offset++] = 0x00;
-    resp[offset++] = 0x00;
-    resp[offset++] = 0x00;
-    resp[offset++] = 0x3c;
-    resp[offset++] = 0x00;
-    resp[offset++] = 0x04;
-    const parts = REDIRECT_IP.split('.');
-    parts.forEach(p => resp[offset++] = parseInt(p));
-    server.send(resp.slice(0, offset), rinfo.port, rinfo.address);
+  if ((qname === TARGET || qname.endsWith('.anansigame.org') || qname.includes('anansi')) && qtype === 1) {
+    const resp = buildAResponse(msg, pos, REDIRECT_IP);
+    server.send(resp, rinfo.port, rinfo.address);
     console.log(`[DNS] ${qname} -> ${REDIRECT_IP}`);
   } else {
     // Forward to real DNS
-    const realDns = Buffer.from([8,8,8,8]);
-    server.send(msg, 53, realDns, (err) => {
-      if (err) console.log('[DNS] Forward error:', err);
+    const fwdServer = udp.createSocket('udp4');
+    fwdServer.on('message', (fwdMsg) => {
+      server.send(fwdMsg, rinfo.port, rinfo.address);
+      fwdServer.close();
     });
+    fwdServer.send(msg, 53, '8.8.8.8');
   }
 });
 
 server.on('listening', () => {
   const addr = server.address();
   console.log(`[DNS] Server running on ${addr.address}:${addr.port}`);
-  console.log(`[DNS] ${TARGET} -> ${REDIRECT_IP}`);
-  console.log('[DNS] Set phone WiFi DNS to', REDIRECT_IP);
+  console.log(`[DNS] Set your Android phone WiFi DNS to: ${REDIRECT_IP}`);
+  console.log(`[DNS] Then open the game - it will connect to your local server!`);
 });
 
-server.bind(PORT);
+try {
+  server.bind(PORT);
+} catch (e) {
+  console.error(`[DNS] Failed to bind port ${PORT}: ${e.message}`);
+  console.error('[DNS] Run as Administrator on Windows!');
+  process.exit(1);
+}

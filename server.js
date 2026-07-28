@@ -1,65 +1,126 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { xorEncode, xorDecode, base64Encode, base64Decode, unwrapRequest, parseClientPacket } = require('./protocol');
 const G = require('./game-logic');
 const DB = require('./database');
 
 const app = express();
 app.use(express.static(path.join(__dirname, 'public')));
-const PORT = 8080;
+const PORT = process.env.PORT || 8080;
 
-// Logger middleware BEFORE body parsers to capture raw info
-app.use((req, res, next) => {
-  const ct = req.get('Content-Type') || 'none';
-  console.log(`[REQ] ${req.method} ${req.path} ct=${ct}`);
-  next();
-});
-
-app.use(express.raw({ type: 'application/octet-stream', limit: '10mb' }));
-app.use(express.text({ type: 'text/plain', limit: '10mb' }));
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-app.use((req, res, next) => {
-  const raw = req.body;
-  if (raw) {
-    const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(String(raw));
-    console.log(`[RAW] ${req.method} ${req.path} body(${buf.length}B) ct=${req.get('Content-Type')||'?'} hex=${buf.slice(0, 96).toString('hex')} text=${buf.slice(0, 96).toString('latin1').replace(/[^\x20-\x7E]/g,'?')}`);
+// RC4 implementation (ngRC414)
+function rc4Encrypt(key, data) {
+  const s = [...Array(256).keys()];
+  const k = Buffer.isBuffer(key) ? key : Buffer.from(key);
+  const d = Buffer.isBuffer(data) ? data : Buffer.from(data, 'binary');
+  for (let i = 0, j = 0; i < 256; i++) {
+    j = (j + s[i] + k[i % k.length]) & 0xFF;
+    [s[i], s[j]] = [s[j], s[i]];
   }
-  if (!raw) return next();
-  if (Buffer.isBuffer(raw) && raw.length > 0) {
-    try {
-      const decrypted = xorDecode(raw);
-      req.body = parseClientPacket(JSON.parse(decrypted));
-    } catch (e) {
-      try {
-        const asText = raw.toString('utf8').trim();
-        const fromBase64 = unwrapRequest(asText);
-        req.body = parseClientPacket(fromBase64);
-      } catch (e2) {
-        try { req.body = parseClientPacket(JSON.parse(raw.toString('utf8'))); } catch (e3) {}
-      }
-    }
-  } else if (typeof raw === 'string' && raw.length > 0) {
-    try {
-      const fromBase64 = unwrapRequest(raw.trim());
-      req.body = parseClientPacket(fromBase64);
-    } catch (e) {
-      try { req.body = parseClientPacket(JSON.parse(raw)); } catch (e2) {}
-    }
+  let i = 0, j = 0;
+  const result = Buffer.alloc(d.length);
+  for (let idx = 0; idx < d.length; idx++) {
+    i = (i + 1) & 0xFF;
+    j = (j + s[i]) & 0xFF;
+    [s[i], s[j]] = [s[j], s[i]];
+    result[idx] = d[idx] ^ s[(s[i] + s[j]) & 0xFF];
   }
-  next();
-});
-
-function jsonRes(res, data) {
-  schedulePersist();
-  res.json(data);
+  return result;
 }
+function rc4Decrypt(key, data) { return rc4Encrypt(key, data); } // RC4 is symmetric
 
-function xorRes(res, data) {
+// rawBody capture — runs BEFORE any Express body parser
+app.use((req, res, next) => {
+  const chunks = [];
+  req.on('data', c => chunks.push(c));
+  req.on('end', () => {
+    req.rawBody = Buffer.concat(chunks);
+    req.useXor = false;
+    req.useBase64 = false;
+    req.useRC4 = false;
+
+    const raw = req.rawBody;
+    if (raw.length === 0) return next();
+
+    const ct = req.get('Content-Type') || '';
+    const bodyStr = raw.toString('utf8').trim();
+
+    // 1. Try Base64 → XOR → JSON (Android game protocol)
+    if (/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(bodyStr) && bodyStr.length > 20) {
+      try {
+        const fromB64 = base64Decode(bodyStr);
+        const xorStr = xorDecode(fromB64);
+        const json = JSON.parse(xorStr);
+        req.body = parseClientPacket(json);
+        req.useXor = true;
+        req.useBase64 = true;
+        req.decoded = 'b64+xor';
+        console.log(`[DECODE] ${req.path} → Base64+XOR (Android format)`);
+        return next();
+      } catch(e) {}
+    }
+
+    // 2. Try raw XOR → JSON (web client / octet-stream)
+    try {
+      const xorStr = xorDecode(raw);
+      const json = JSON.parse(xorStr);
+      req.body = parseClientPacket(json);
+      req.useXor = true;
+      req.decoded = 'raw-xor';
+      console.log(`[DECODE] ${req.path} → raw XOR`);
+      return next();
+    } catch(e) {}
+
+    // 3. Try RC4 → JSON (fallback)
+    try {
+      const LOTR_KEY = "One ring to rule them all, one ring to find them, one ring to bring them all and in the darkness bind them.";
+      const rc4Str = rc4Decrypt(LOTR_KEY, raw).toString('utf8');
+      const json = JSON.parse(rc4Str);
+      req.body = parseClientPacket(json);
+      req.useRC4 = true;
+      req.decoded = 'rc4';
+      console.log(`[DECODE] ${req.path} → RC4`);
+      return next();
+    } catch(e) {}
+
+    // 4. Try plain JSON
+    try {
+      const json = JSON.parse(bodyStr);
+      req.body = parseClientPacket(json);
+      req.decoded = 'json';
+      console.log(`[DECODE] ${req.path} → plain JSON`);
+      return next();
+    } catch(e) {}
+
+    // 5. Fallback — keep raw string if all decoding fails
+    console.log(`[DECODE] ${req.path} → UNKNOWN format, keeping raw`);
+    req.body = bodyStr.length > 0 ? { _raw: bodyStr.slice(0, 200) } : {};
+    next();
+  });
+});
+
+function respond(req, res, data) {
   schedulePersist();
-  // Send as JSON for the game client (it expects JSON with sessionToken etc.)
+  const json = JSON.stringify(data);
+
+  if (req.useRC4) {
+    res.type('application/octet-stream');
+    res.send(rc4Encrypt("One ring to rule them all, one ring to find them, one ring to bring them all and in the darkness bind them.", json));
+    return;
+  }
+  if (req.useXor) {
+    const encrypted = xorEncode(json);
+    if (req.useBase64) {
+      res.type('text/plain');
+      res.send(base64Encode(encrypted));
+    } else {
+      res.type('application/octet-stream');
+      res.send(encrypted);
+    }
+    return;
+  }
   res.json(data);
 }
 
@@ -124,10 +185,10 @@ function ensurePlayer(player) {
   return player;
 }
 
-// Version check & maintenance endpoints (game expects JSON, not XOR)
+// Version check & maintenance endpoints
 app.post(['/', '/checkversion', '/maintenance/check'], (req, res) => {
   console.log(`[VERSION_CHECK] body keys=${Object.keys(req.body||{})} raw=${JSON.stringify(req.body||'')}`);
-  res.json({
+  respond(req, res, {
     reviewVersion: 0,
     majorVersion: 1,
     minorVersion: 1,
@@ -157,15 +218,17 @@ app.post('/ReqLogin', (req, res) => {
   DB.saveSession(sessionToken, player.id);
   persistPlayer(player);
 
-  jsonRes(res, { code: 1, sessionToken, player: { ...G.getPlayerStats(player) } });
+  const playerData = G.getPlayerStats(player);
+  playerData.session_token = sessionToken;
+  respond(req, res, { code: 1, sessionToken, session_token: sessionToken, player: playerData });
 });
 
 app.post('/ReqDoCrime', (req, res) => {
   const player = getPlayer(req);
-  if (!player) return xorRes(res, { code: 0, msg: 'not logged in' });
+  if (!player) return respond(req, res, { code: 0, msg: 'not logged in' });
   ensurePlayer(player);
   const { crimeType } = req.body || {};
-  if (player.nerve < 1) return xorRes(res, { code: 0, msg: 'no nerve', nerve: player.nerve });
+  if (player.nerve < 1) return respond(req, res, { code: 0, msg: 'no nerve', nerve: player.nerve });
 
   const crimeData = gameData['crime.city']?.records?.find(r => r.lang_id === parseInt(crimeType) || r.id === parseInt(crimeType)) || null;
   const crimeLevel = Math.floor(player.level / 5) + 1;
@@ -191,7 +254,7 @@ app.post('/ReqDoCrime', (req, res) => {
   G.finishMissionForPlayer(player, 28);
   persistPlayer(player);
 
-  xorRes(res, {
+  respond(req, res, {
     code: 1, result: 'success', exp: expGain, money: moneyGain,
     player: { level: player.level, money: player.money, experience: player.experience, nerve: player.nerve, wanted: player.wanted, jail: player.jail },
     crimeData: crimeData ? { name: crimeData.name, lang_id: crimeData.lang_id, id: crimeData.id } : null,
@@ -200,46 +263,46 @@ app.post('/ReqDoCrime', (req, res) => {
 
 app.post('/ReqLevelUp', (req, res) => {
   const player = getPlayer(req);
-  if (!player) return xorRes(res, { code: 0 });
+  if (!player) return respond(req, res, { code: 0 });
   ensurePlayer(player);
   const { upLevelNum } = req.body || {};
   const levels = parseInt(upLevelNum) || 1;
   const cost = player.level * 100 * levels;
-  if (player.money < cost) return xorRes(res, { code: 0, msg: 'not enough money', need: cost, money: player.money });
+  if (player.money < cost) return respond(req, res, { code: 0, msg: 'not enough money', need: cost, money: player.money });
 
   player.money -= cost;
   player.level += levels;
   player.experience = 0;
 
-  xorRes(res, { code: 1, level: player.level, player: { level: player.level, experience: player.experience, money: player.money } });
+  respond(req, res, { code: 1, level: player.level, player: { level: player.level, experience: player.experience, money: player.money } });
 });
 
 app.post('/ReqStrengthen', (req, res) => {
   const player = getPlayer(req);
-  if (!player) return xorRes(res, { code: 0 });
+  if (!player) return respond(req, res, { code: 0 });
   ensurePlayer(player);
   const { equipType, equipIdx } = req.body || {};
   const cost = player.level * 50;
-  if (player.money < cost) return xorRes(res, { code: 0, msg: 'not enough money' });
+  if (player.money < cost) return respond(req, res, { code: 0, msg: 'not enough money' });
 
   player.money -= cost;
   const success = Math.random() < 0.7;
   if (success) {
     player.strength = (player.strength || 10) + 1;
-    xorRes(res, { code: 1, isSuccess: true, strength: player.strength, player: G.getPlayerStats(player) });
+    respond(req, res, { code: 1, isSuccess: true, strength: player.strength, player: G.getPlayerStats(player) });
   } else {
-    xorRes(res, { code: 1, isSuccess: false, msg: 'strengthen failed', player: G.getPlayerStats(player) });
+    respond(req, res, { code: 1, isSuccess: false, msg: 'strengthen failed', player: G.getPlayerStats(player) });
   }
 });
 
 app.post('/ReqFightNew', (req, res) => {
   const player = getPlayer(req);
-  if (!player) return xorRes(res, { code: 0 });
+  if (!player) return respond(req, res, { code: 0 });
   ensurePlayer(player);
   const { fightType, targetId } = req.body || {};
   const type = parseInt(fightType) || G.FIGHT_TYPES.FIGHT_PVE;
 
-  if (player.health < 10) return xorRes(res, { code: 0, msg: 'health too low', health: player.health });
+  if (player.health < 10) return respond(req, res, { code: 0, msg: 'health too low', health: player.health });
 
   const npc = { strength: 8 + player.level * 2, endurance: 8 + player.level, nimble: 8 + Math.floor(player.level / 2), speed: 8 + Math.floor(player.level / 3), weapon: null, equipment: null };
   const opponent = targetId ? { ...npc, strength: npc.strength + 5 } : npc;
@@ -258,7 +321,7 @@ app.post('/ReqFightNew', (req, res) => {
   if (result.result === G.FIGHT_RESULT.SUCCESS) G.finishMissionForPlayer(player, 27);
   if (result.result === G.FIGHT_RESULT.FAIL && player.health <= 0) { player.health = 10; player.jail = 10; }
 
-  xorRes(res, {
+  respond(req, res, {
     code: 1, result: result.result, expGain: result.expGain, moneyGain: result.moneyGain,
     fightType: type, player: G.getPlayerStats(player),
   });
@@ -266,9 +329,9 @@ app.post('/ReqFightNew', (req, res) => {
 
 app.post('/ReqFightCooperateBossNew', (req, res) => {
   const player = getPlayer(req);
-  if (!player) return xorRes(res, { code: 0 });
+  if (!player) return respond(req, res, { code: 0 });
   ensurePlayer(player);
-  if (player.energy < 5) return xorRes(res, { code: 0, msg: 'not enough energy' });
+  if (player.energy < 5) return respond(req, res, { code: 0, msg: 'not enough energy' });
 
   player.energy -= 5;
   const bossHp = 500 + player.level * 50;
@@ -283,16 +346,16 @@ app.post('/ReqFightCooperateBossNew', (req, res) => {
     G.checkMissionLevelUp(player, player.level);
   }
 
-  xorRes(res, { code: 1, damage, reward, bossRemainingHp: Math.max(0, bossHp - damage), player: G.getPlayerStats(player) });
+  respond(req, res, { code: 1, damage, reward, bossRemainingHp: Math.max(0, bossHp - damage), player: G.getPlayerStats(player) });
 });
 
 app.post('/ReqUpdateMoney', (req, res) => {
   const player = getPlayer(req);
-  if (!player) return xorRes(res, { code: 0 });
+  if (!player) return respond(req, res, { code: 0 });
   ensurePlayer(player);
   const { gameType, bet } = req.body || {};
   const betAmount = parseInt(bet) || 100;
-  if (player.money < betAmount) return xorRes(res, { code: 0, msg: 'not enough money' });
+  if (player.money < betAmount) return respond(req, res, { code: 0, msg: 'not enough money' });
 
   const win = Math.random() > 0.45;
   let multiplier = 1;
@@ -305,23 +368,23 @@ app.post('/ReqUpdateMoney', (req, res) => {
   if (win) {
     const winnings = Math.floor(betAmount * multiplier);
     player.money += winnings;
-    xorRes(res, { code: 1, win: true, gameType: gt, bet: betAmount, winnings, money: player.money });
+    respond(req, res, { code: 1, win: true, gameType: gt, bet: betAmount, winnings, money: player.money });
   } else {
     player.money -= betAmount;
-    xorRes(res, { code: 1, win: false, gameType: gt, bet: betAmount, money: player.money });
+    respond(req, res, { code: 1, win: false, gameType: gt, bet: betAmount, money: player.money });
   }
 });
 
 app.post('/ReqExcercise', (req, res) => {
   const player = getPlayer(req);
-  if (!player) return xorRes(res, { code: 0 });
+  if (!player) return respond(req, res, { code: 0 });
   ensurePlayer(player);
   const { excerciseType, attribute } = req.body || {};
   const eType = parseInt(excerciseType);
 
   if (eType === -1) {
     const cost = 10 + player.level * 5;
-    if (player.money < cost) return xorRes(res, { code: 0, msg: 'not enough money' });
+    if (player.money < cost) return respond(req, res, { code: 0, msg: 'not enough money' });
     player.money -= cost;
     const happy = 50;
     const energy = player.energy || 100;
@@ -338,61 +401,61 @@ app.post('/ReqExcercise', (req, res) => {
     G.finishMissionForPlayer(player, 23);
     G.finishMissionForPlayer(player, 23);
 
-    xorRes(res, { code: 1, effect: Math.floor(effect), attribute, player: G.getPlayerStats(player) });
+    respond(req, res, { code: 1, effect: Math.floor(effect), attribute, player: G.getPlayerStats(player) });
   } else if (eType === 1) {
     const resetCost = player.level * 100;
-    if (player.money < resetCost) return xorRes(res, { code: 0, msg: 'not enough money' });
+    if (player.money < resetCost) return respond(req, res, { code: 0, msg: 'not enough money' });
     player.money -= resetCost;
     player.strength = 10;
     player.endurance = 10;
     player.speed = 10;
     player.nimble = 10;
-    xorRes(res, { code: 1, reset: true, player: G.getPlayerStats(player) });
+    respond(req, res, { code: 1, reset: true, player: G.getPlayerStats(player) });
   } else {
-    xorRes(res, { code: 0, msg: 'invalid excercise type' });
+    respond(req, res, { code: 0, msg: 'invalid excercise type' });
   }
 });
 
 app.post('/ReqPrisonBail', (req, res) => {
   const player = getPlayer(req);
-  if (!player) return xorRes(res, { code: 0 });
+  if (!player) return respond(req, res, { code: 0 });
   ensurePlayer(player);
-  if (!player.jail || player.jail <= 0) return xorRes(res, { code: 0, msg: 'not in jail' });
+  if (!player.jail || player.jail <= 0) return respond(req, res, { code: 0, msg: 'not in jail' });
 
   const bailCost = 500 + player.level * 100;
-  if (player.money < bailCost) return xorRes(res, { code: 0, msg: 'not enough money' });
+  if (player.money < bailCost) return respond(req, res, { code: 0, msg: 'not enough money' });
 
   player.money -= bailCost;
   player.jail = 0;
 
-  xorRes(res, { code: 1, bailCost, player: G.getPlayerStats(player) });
+  respond(req, res, { code: 1, bailCost, player: G.getPlayerStats(player) });
 });
 
 app.post('/ReqPrisonBust', (req, res) => {
   const player = getPlayer(req);
-  if (!player) return xorRes(res, { code: 0 });
+  if (!player) return respond(req, res, { code: 0 });
   ensurePlayer(player);
-  if (!player.jail || player.jail <= 0) return xorRes(res, { code: 0, msg: 'not in jail' });
-  if (player.health < 30) return xorRes(res, { code: 0, msg: 'health too low' });
+  if (!player.jail || player.jail <= 0) return respond(req, res, { code: 0, msg: 'not in jail' });
+  if (player.health < 30) return respond(req, res, { code: 0, msg: 'health too low' });
 
   const success = Math.random() < 0.4;
   if (success) {
     player.jail = 0;
     player.health = Math.max(0, player.health - 20);
-    xorRes(res, { code: 1, result: 1, player: G.getPlayerStats(player) });
+    respond(req, res, { code: 1, result: 1, player: G.getPlayerStats(player) });
   } else {
     player.health = Math.max(0, player.health - 40);
-    xorRes(res, { code: 1, result: 0, player: G.getPlayerStats(player) });
+    respond(req, res, { code: 1, result: 0, player: G.getPlayerStats(player) });
   }
 });
 
 app.post('/ReqEnterDungeon', (req, res) => {
   const player = getPlayer(req);
-  if (!player) return xorRes(res, { code: 0 });
+  if (!player) return respond(req, res, { code: 0 });
   ensurePlayer(player);
   const { dungeonId } = req.body || {};
   const dId = parseInt(dungeonId) || 1;
-  if (player.energy < 10) return xorRes(res, { code: 0, msg: 'not enough energy' });
+  if (player.energy < 10) return respond(req, res, { code: 0, msg: 'not enough energy' });
 
   player.energy -= 10;
   player.dungeonLevel = (player.dungeonLevel || 0) + 1;
@@ -400,12 +463,12 @@ app.post('/ReqEnterDungeon', (req, res) => {
 
   G.finishMissionForPlayer(player, 51);
 
-  xorRes(res, { code: 1, dungeonId: dId, isfristEnter: isFirst, dungeonLevel: player.dungeonLevel, player: G.getPlayerStats(player) });
+  respond(req, res, { code: 1, dungeonId: dId, isfristEnter: isFirst, dungeonLevel: player.dungeonLevel, player: G.getPlayerStats(player) });
 });
 
 app.post('/ReqPassLevel', (req, res) => {
   const player = getPlayer(req);
-  if (!player) return xorRes(res, { code: 0 });
+  if (!player) return respond(req, res, { code: 0 });
   ensurePlayer(player);
   const { dungeonId, result } = req.body || {};
   const r = parseInt(result) || 1;
@@ -422,20 +485,20 @@ app.post('/ReqPassLevel', (req, res) => {
       G.checkMissionLevelUp(player, player.level);
     }
 
-    xorRes(res, { code: 1, result: 1, expGain, moneyGain, player: G.getPlayerStats(player) });
+    respond(req, res, { code: 1, result: 1, expGain, moneyGain, player: G.getPlayerStats(player) });
   } else {
-    xorRes(res, { code: 1, result: 0, player: G.getPlayerStats(player) });
+    respond(req, res, { code: 1, result: 0, player: G.getPlayerStats(player) });
   }
 });
 
 app.post('/ReqApplySubject', (req, res) => {
   const player = getPlayer(req);
-  if (!player) return xorRes(res, { code: 0 });
+  if (!player) return respond(req, res, { code: 0 });
   ensurePlayer(player);
   const { subjectId } = req.body || {};
   const cost = 200 + player.level * 30;
-  if (player.money < cost) return xorRes(res, { code: 0, msg: 'not enough money' });
-  if (player.energy < 5) return xorRes(res, { code: 0, msg: 'not enough energy' });
+  if (player.money < cost) return respond(req, res, { code: 0, msg: 'not enough money' });
+  if (player.energy < 5) return respond(req, res, { code: 0, msg: 'not enough energy' });
 
   player.money -= cost;
   player.energy -= 5;
@@ -448,12 +511,12 @@ app.post('/ReqApplySubject', (req, res) => {
     G.checkMissionLevelUp(player, player.level);
   }
 
-  xorRes(res, { code: 1, subjectId: parseInt(subjectId) || 1, player: G.getPlayerStats(player) });
+  respond(req, res, { code: 1, subjectId: parseInt(subjectId) || 1, player: G.getPlayerStats(player) });
 });
 
 app.post('/ReqGetSalery', (req, res) => {
   const player = getPlayer(req);
-  if (!player) return xorRes(res, { code: 0 });
+  if (!player) return respond(req, res, { code: 0 });
   ensurePlayer(player);
   const jobCate = player.job;
   const jobLvl = player.jobLevel || 0;
@@ -465,31 +528,31 @@ app.post('/ReqGetSalery', (req, res) => {
 
   G.finishMissionForPlayer(player, 1);
 
-  xorRes(res, { code: 1, salary, money: player.money, player: G.getPlayerStats(player) });
+  respond(req, res, { code: 1, salary, money: player.money, player: G.getPlayerStats(player) });
 });
 
 app.post('/ReqSubmitNews', (req, res) => {
   const player = getPlayer(req);
-  if (!player) return xorRes(res, { code: 0 });
+  if (!player) return respond(req, res, { code: 0 });
   ensurePlayer(player);
   const { newsContent } = req.body || {};
   const cost = 50 + player.level * 10;
-  if (player.money < cost) return xorRes(res, { code: 0, msg: 'not enough money' });
+  if (player.money < cost) return respond(req, res, { code: 0, msg: 'not enough money' });
 
   player.money -= cost;
   player.wanted = Math.min(100, (player.wanted || 0) + 5);
 
-  xorRes(res, { code: 1, published: true, content: newsContent || '', player: G.getPlayerStats(player) });
+  respond(req, res, { code: 1, published: true, content: newsContent || '', player: G.getPlayerStats(player) });
 });
 
 app.post('/ReqRewardLoser', (req, res) => {
   const player = getPlayer(req);
-  if (!player) return xorRes(res, { code: 0 });
+  if (!player) return respond(req, res, { code: 0 });
   ensurePlayer(player);
   const { targetId, fate } = req.body || {};
   const f = parseInt(fate) || 1;
 
-  if (player.energy < 3) return xorRes(res, { code: 0, msg: 'not enough energy' });
+  if (player.energy < 3) return respond(req, res, { code: 0, msg: 'not enough energy' });
   player.energy -= 3;
 
   const reward = player.level * 20;
@@ -506,31 +569,31 @@ app.post('/ReqRewardLoser', (req, res) => {
     G.checkMissionLevelUp(player, player.level);
   }
 
-  xorRes(res, { code: 1, fate: f, reward, player: G.getPlayerStats(player) });
+  respond(req, res, { code: 1, fate: f, reward, player: G.getPlayerStats(player) });
 });
 
 app.post('/ReqMergeGoods', (req, res) => {
   const player = getPlayer(req);
-  if (!player) return xorRes(res, { code: 0 });
+  if (!player) return respond(req, res, { code: 0 });
   ensurePlayer(player);
   const { mergeType, itemId, amount } = req.body || {};
   const mType = parseInt(mergeType) || 0;
 
   if (mType === 0) {
-    if (player.money < 100) return xorRes(res, { code: 0, msg: 'not enough money' });
+    if (player.money < 100) return respond(req, res, { code: 0, msg: 'not enough money' });
     player.money -= 100;
     player.experience += 50;
     G.finishMissionForPlayer(player, 54);
   } else if (mType === 1) {
-    if (player.gold < 1) return xorRes(res, { code: 0, msg: 'not enough gold' });
+    if (player.gold < 1) return respond(req, res, { code: 0, msg: 'not enough gold' });
     player.gold -= 1;
     player.money += 10000;
   } else if (mType === 2) {
-    if (player.money < 1000) return xorRes(res, { code: 0, msg: 'not enough money' });
+    if (player.money < 1000) return respond(req, res, { code: 0, msg: 'not enough money' });
     player.money -= 1000;
     player.experience += 200;
   } else if (mType === 3) {
-    if (player.experience < 500) return xorRes(res, { code: 0, msg: 'not enough exp' });
+    if (player.experience < 500) return respond(req, res, { code: 0, msg: 'not enough exp' });
     player.experience -= 500;
     player.level++;
   }
@@ -540,31 +603,31 @@ app.post('/ReqMergeGoods', (req, res) => {
     player.level++;
   }
 
-  xorRes(res, { code: 1, mergeType: mType, player: G.getPlayerStats(player) });
+  respond(req, res, { code: 1, mergeType: mType, player: G.getPlayerStats(player) });
 });
 
 app.post('/ReqChatPost', (req, res) => {
   const player = getPlayer(req);
-  if (!player) return xorRes(res, { code: 0 });
+  if (!player) return respond(req, res, { code: 0 });
   ensurePlayer(player);
   const { chatType, message } = req.body || {};
   const cType = parseInt(chatType) || 0;
   const cost = cType === 0 ? 50 : 10;
-  if (player.money < cost) return xorRes(res, { code: 0, msg: 'not enough money' });
+  if (player.money < cost) return respond(req, res, { code: 0, msg: 'not enough money' });
 
   player.money -= cost;
   DB.addChat(player.id, player.name, cType, message || '');
 
   if (cType === 0) G.finishMissionForPlayer(player, 21);
 
-  xorRes(res, { code: 1, chatType: cType, posted: true, player: G.getPlayerStats(player) });
+  respond(req, res, { code: 1, chatType: cType, posted: true, player: G.getPlayerStats(player) });
 });
 
 app.post('/ReqFactionLoser', (req, res) => {
   const player = getPlayer(req);
-  if (!player) return xorRes(res, { code: 0 });
+  if (!player) return respond(req, res, { code: 0 });
   ensurePlayer(player);
-  if (!player.faction) return xorRes(res, { code: 0, msg: 'not in a faction' });
+  if (!player.faction) return respond(req, res, { code: 0, msg: 'not in a faction' });
 
   const consisNum = parseInt(req.body?.consisNum) || 0;
   player.money += 100 + consisNum * 10;
@@ -575,47 +638,47 @@ app.post('/ReqFactionLoser', (req, res) => {
     player.level++;
   }
 
-  xorRes(res, { code: 1, consisNum, player: G.getPlayerStats(player) });
+  respond(req, res, { code: 1, consisNum, player: G.getPlayerStats(player) });
 });
 
 app.post('/ReqFactionJoinMilitia', (req, res) => {
   const player = getPlayer(req);
-  if (!player) return xorRes(res, { code: 0 });
+  if (!player) return respond(req, res, { code: 0 });
   ensurePlayer(player);
-  if (!player.faction) return xorRes(res, { code: 0, msg: 'not in a faction' });
+  if (!player.faction) return respond(req, res, { code: 0, msg: 'not in a faction' });
   const { localTroopIdx } = req.body || {};
   const troopIdx = parseInt(localTroopIdx) || 0;
 
-  if (player.energy < 5) return xorRes(res, { code: 0, msg: 'not enough energy' });
+  if (player.energy < 5) return respond(req, res, { code: 0, msg: 'not enough energy' });
   player.energy -= 5;
   player.strength = (player.strength || 10) + 1;
 
-  xorRes(res, { code: 1, localTroopIdx: troopIdx, player: G.getPlayerStats(player) });
+  respond(req, res, { code: 1, localTroopIdx: troopIdx, player: G.getPlayerStats(player) });
 });
 
 app.post('/ReqFlyTo', (req, res) => {
   const player = getPlayer(req);
-  if (!player) return xorRes(res, { code: 0 });
+  if (!player) return respond(req, res, { code: 0 });
   ensurePlayer(player);
   const { cityId } = req.body || {};
   const targetCity = parseInt(cityId) || 0;
 
   const cost = 100 + player.level * 10;
-  if (player.money < cost) return xorRes(res, { code: 0, msg: 'not enough money' });
+  if (player.money < cost) return respond(req, res, { code: 0, msg: 'not enough money' });
 
   player.money -= cost;
   player.city = targetCity;
 
   G.finishMissionForPlayer(player, 36);
 
-  xorRes(res, { code: 1, cityId: targetCity, player: G.getPlayerStats(player) });
+  respond(req, res, { code: 1, cityId: targetCity, player: G.getPlayerStats(player) });
 });
 
 app.post('/ReqFAFightInfo', (req, res) => {
   const player = getPlayer(req);
-  if (!player) return xorRes(res, { code: 0 });
+  if (!player) return respond(req, res, { code: 0 });
   ensurePlayer(player);
-  if (player.energy < 5) return xorRes(res, { code: 0, msg: 'not enough energy' });
+  if (player.energy < 5) return respond(req, res, { code: 0, msg: 'not enough energy' });
 
   player.energy -= 5;
   const power = G.calcFightPower(player);
@@ -633,14 +696,14 @@ app.post('/ReqFAFightInfo', (req, res) => {
     player.level++;
   }
 
-  xorRes(res, { code: 1, win, power: Math.floor(power), opponentPower: Math.floor(opponentPower), player: G.getPlayerStats(player) });
+  respond(req, res, { code: 1, win, power: Math.floor(power), opponentPower: Math.floor(opponentPower), player: G.getPlayerStats(player) });
 });
 
 app.post('/ReqLadderFighterJudgeNew', (req, res) => {
   const player = getPlayer(req);
-  if (!player) return xorRes(res, { code: 0 });
+  if (!player) return respond(req, res, { code: 0 });
   ensurePlayer(player);
-  if (player.energy < 3) return xorRes(res, { code: 0, msg: 'not enough energy' });
+  if (player.energy < 3) return respond(req, res, { code: 0, msg: 'not enough energy' });
 
   player.energy -= 3;
   const result = G.simulateFight(player, { strength: 12 + player.level * 2, endurance: 10 + player.level, nimble: 8 + Math.floor(player.level / 2), speed: 8 + Math.floor(player.level / 2), weapon: null, equipment: null });
@@ -654,20 +717,20 @@ app.post('/ReqLadderFighterJudgeNew', (req, res) => {
 
   if (result.result === G.FIGHT_RESULT.SUCCESS) G.finishMissionForPlayer(player, 52);
 
-  xorRes(res, { code: 1, result: result.result, ...result, player: G.getPlayerStats(player) });
+  respond(req, res, { code: 1, result: result.result, ...result, player: G.getPlayerStats(player) });
 });
 
 app.post('/ReqPlayerInfo', (req, res) => {
   const player = getPlayer(req);
-  if (!player) return xorRes(res, { code: 0 });
-  xorRes(res, { code: 1, player: G.getPlayerStats(player) });
+  if (!player) return respond(req, res, { code: 0 });
+  respond(req, res, { code: 1, player: G.getPlayerStats(player) });
 });
 
 app.post('/ReqGetMissionInfo', (req, res) => {
   const player = getPlayer(req);
-  if (!player) return xorRes(res, { code: 0 });
+  if (!player) return respond(req, res, { code: 0 });
   ensurePlayer(player);
-  xorRes(res, {
+  respond(req, res, {
     code: 1,
     currentMissionId: G.getCurMissionId(player),
     completedMissions: [...(player.completedMissions || [])].map(Number),
@@ -677,29 +740,29 @@ app.post('/ReqGetMissionInfo', (req, res) => {
 
 app.post('/ReqJoinJob', (req, res) => {
   const player = getPlayer(req);
-  if (!player) return xorRes(res, { code: 0 });
+  if (!player) return respond(req, res, { code: 0 });
   ensurePlayer(player);
   const { jobType } = req.body || {};
   const jt = parseInt(jobType);
-  if (!jt || !G.JOB_SALARIES[jt]) return xorRes(res, { code: 0, msg: 'invalid job type' });
+  if (!jt || !G.JOB_SALARIES[jt]) return respond(req, res, { code: 0, msg: 'invalid job type' });
 
   player.job = jt;
   player.jobLevel = 1;
 
   G.finishMissionForPlayer(player, 1);
 
-  xorRes(res, { code: 1, job: jt, jobLevel: 1, player: G.getPlayerStats(player) });
+  respond(req, res, { code: 1, job: jt, jobLevel: 1, player: G.getPlayerStats(player) });
 });
 
 app.post('/ReqBuyGood', (req, res) => {
   const player = getPlayer(req);
-  if (!player) return xorRes(res, { code: 0 });
+  if (!player) return respond(req, res, { code: 0 });
   ensurePlayer(player);
   const { goodType, goodCate, amount } = req.body || {};
   const a = parseInt(amount) || 1;
   const price = 50 + player.level * 5;
   const total = price * a;
-  if (player.money < total) return xorRes(res, { code: 0, msg: 'not enough money' });
+  if (player.money < total) return respond(req, res, { code: 0, msg: 'not enough money' });
 
   player.money -= total;
   for (let i = 0; i < a; i++) {
@@ -715,12 +778,12 @@ app.post('/ReqBuyGood', (req, res) => {
   if (gc === 2 && gt === 509) G.finishMissionForPlayer(player, 39);
   if (gc === 2 && gt === 507) G.finishMissionForPlayer(player, 41);
 
-  xorRes(res, { code: 1, goodType: gt, goodCate: gc, amount: a, totalCost: total, player: G.getPlayerStats(player) });
+  respond(req, res, { code: 1, goodType: gt, goodCate: gc, amount: a, totalCost: total, player: G.getPlayerStats(player) });
 });
 
 app.post('/ReqSellGood', (req, res) => {
   const player = getPlayer(req);
-  if (!player) return xorRes(res, { code: 0 });
+  if (!player) return respond(req, res, { code: 0 });
   ensurePlayer(player);
   const { goodType, goodCate, amount, sellType } = req.body || {};
   const a = parseInt(amount) || 1;
@@ -728,7 +791,7 @@ app.post('/ReqSellGood', (req, res) => {
   const total = price * a;
 
   if (player.inventory.filter(i => i.type === parseInt(goodType) && i.cate === parseInt(goodCate)).length < a) {
-    return xorRes(res, { code: 0, msg: 'not enough items' });
+    return respond(req, res, { code: 0, msg: 'not enough items' });
   }
   let removed = 0;
   player.inventory = player.inventory.filter(i => {
@@ -742,12 +805,12 @@ app.post('/ReqSellGood', (req, res) => {
   if (st === 0 && goodCate == 4 && goodType == 663) G.finishMissionForPlayer(player, 38);
   if (st === 1 && goodCate == 2 && goodType == 507) G.finishMissionForPlayer(player, 42);
 
-  xorRes(res, { code: 1, sold: true, totalPrice: total, player: G.getPlayerStats(player) });
+  respond(req, res, { code: 1, sold: true, totalPrice: total, player: G.getPlayerStats(player) });
 });
 
 app.post('/ReqUseEquipment', (req, res) => {
   const player = getPlayer(req);
-  if (!player) return xorRes(res, { code: 0 });
+  if (!player) return respond(req, res, { code: 0 });
   ensurePlayer(player);
   const { useType, equipIdx } = req.body || {};
   const ut = parseInt(useType) || G.EQUIP_USE_TYPE.WEAPON;
@@ -756,25 +819,25 @@ app.post('/ReqUseEquipment', (req, res) => {
   else if (ut === G.EQUIP_USE_TYPE.ARMOR) { player.equipment = parseInt(equipIdx) || 1; G.finishMissionForPlayer(player, 14); }
   else if (ut === G.EQUIP_USE_TYPE.MOUNT) { player.mount = parseInt(equipIdx) || 1; }
 
-  xorRes(res, { code: 1, useType: ut, equipIdx: parseInt(equipIdx) || 0, player: G.getPlayerStats(player) });
+  respond(req, res, { code: 1, useType: ut, equipIdx: parseInt(equipIdx) || 0, player: G.getPlayerStats(player) });
 });
 
 app.post('/ReqHospitalCure', (req, res) => {
   const player = getPlayer(req);
-  if (!player) return xorRes(res, { code: 0 });
+  if (!player) return respond(req, res, { code: 0 });
   ensurePlayer(player);
   const { cureType } = req.body || {};
   const ct = parseInt(cureType) || 0;
   const cost = player.level * 20;
 
-  if (player.money < cost) return xorRes(res, { code: 0, msg: 'not enough money' });
+  if (player.money < cost) return respond(req, res, { code: 0, msg: 'not enough money' });
   player.money -= cost;
   player.health = player.maxHealth;
 
   if (ct === 0) G.finishMissionForPlayer(player, 8);
   if (ct === 1) G.finishMissionForPlayer(player, 10);
 
-  xorRes(res, { code: 1, cureType: ct, player: G.getPlayerStats(player) });
+  respond(req, res, { code: 1, cureType: ct, player: G.getPlayerStats(player) });
 });
 
 const BUILDING_DEFS = {
@@ -882,6 +945,7 @@ app.get('/api/players', (req, res) => {
 app.get('/api/chats', (req, res) => res.json(DB.getRecentChats(50)));
 app.get('/health', (req, res) => res.json({ status: 'ok', players: playerCache.size, uptime: process.uptime() }));
 app.get('/debug/sessions', (req, res) => { try { const data = DB.debugSessions(); res.json(data); } catch(e) { res.json({error: e.message}); } });
+app.post('/admin/backup', (req, res) => { try { const p = DB.backup(); respond(req, res, { code: 1, path: p }); } catch(e) { respond(req, res, { code: 0, msg: e.message }); } });
 app.all('/debug/lookup', (req, res) => {
   const t = req.query.token || req.body?.token || '';
   const result = DB.findPlayerIdByToken(t);
@@ -893,6 +957,37 @@ app.all('/debug/lookup', (req, res) => {
   res.json({ inputToken: t, findResult: result, directStep: stepResult, directRow: row });
 });
 
+// Catch-all for unknown endpoints — log them and return generic success
+app.all('*', (req, res) => {
+  const rawHex = req.rawBody ? req.rawBody.length > 0 ? req.rawBody.slice(0, 100).toString('hex') : '(empty)' : '(no raw)';
+  const bodyJson = req.body ? JSON.stringify(req.body).slice(0, 500) : '{}';
+
+  console.log(`\n[UNKNOWN ENDPOINT] ${req.method} ${req.path}`);
+  console.log(`[UNKNOWN HEADERS] ct=${req.get('Content-Type')} ua=${req.get('User-Agent')?.slice(0,80)}`);
+  console.log(`[UNKNOWN DECODED] ${req.decoded || 'none'} body=${bodyJson}`);
+  console.log(`[UNKNOWN RAW_HEX] ${rawHex}`);
+
+  // Log to file
+  const logLine = `[${new Date().toISOString()}] ${req.method} ${req.path}` +
+    ` ct=${req.get('Content-Type')} decode=${req.decoded || 'none'}` +
+    ` raw_hex=${rawHex} body=${bodyJson}\n`;
+  fs.appendFile(path.join(__dirname, 'unknown_requests.log'), logLine, () => {});
+
+  // Save raw body sample
+  const sampleDir = path.join(__dirname, 'samples');
+  if (req.rawBody && req.rawBody.length > 0) {
+    try {
+      fs.mkdirSync(sampleDir, { recursive: true });
+      const safeName = req.path.replace(/[^a-zA-Z0-9]/g, '_') || 'root';
+      const sampleFile = path.join(sampleDir, `${safeName}.bin`);
+      if (!fs.existsSync(sampleFile)) fs.writeFileSync(sampleFile, req.rawBody);
+    } catch(e) {}
+  }
+
+  // Return generic success response so game doesn't crash
+  respond(req, res, { code: 1, msg: 'ok', player: getPlayer(req) || {} });
+});
+
 process.on('SIGINT', () => {
   console.log('[DB] Persisting all players before exit...');
   for (const [id, player] of playerCache) { persistPlayer(player); }
@@ -902,7 +997,7 @@ process.on('SIGINT', () => {
 
 app.use((err, req, res, next) => {
   console.error('[ERROR]', err.message, err.stack);
-  xorRes(res, { code: 0, msg: 'internal server error' });
+  respond(req, res, { code: 0, msg: 'internal server error' });
 });
 
 DB.initDatabase().then(() => {
@@ -910,6 +1005,10 @@ DB.initDatabase().then(() => {
     console.log(`وكر الأوغاد server running on port ${PORT}`);
     console.log(`Game data loaded: ${Object.keys(gameData).length} .city files`);
     console.log(`Endpoints: 22 HTTP handlers + REST + health`);
+    // Auto backup every hour
+    setInterval(() => { try { DB.backup(); } catch(e) { console.error('[BACKUP]', e.message); } }, 3600000);
+    // First backup after 5 minutes
+    setTimeout(() => { try { DB.backup(); } catch(e) {} }, 300000);
   });
 }).catch(e => {
   console.error('Failed to init database:', e);
